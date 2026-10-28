@@ -4,6 +4,7 @@
 在 OpenMV IDE 打开整个文件运行；先预览，确认识线后改 ENABLE_MOTION=True。
 直行时每次播放1号一次，周期之间不插入0号立正。
 准备转向或持续丢线时，等当前周期结束，先立正，再重新判断方向。
+转向结束后，近处线已回正且两块区域均识线时，先前进一周期，减少重复原地转向。
 使用已验证的 UART3 / 9600 / 8N1 接线；不修改主板固件。
 本版按原始动作时间计时，没有动作完成回读；周期衔接会有短小间隔，
 并非主板内无限循环。动作文件时长修改后应同步修改 ACTION_TIME_MS。
@@ -28,6 +29,9 @@ REVERSE_TURNS = False  # True：交换左转 3 和右转 4；用于修正判断�
 LINE_CENTER_X = 80  # 期望黑线所在的横坐标，可校准摄像头安装偏移；允许 1～158。
 TURN_THRESHOLD = 12  # 加权偏差超过 ±此值才转向，等于边界仍直行；允许 1～79。
 # 调小更敏感、易左右摆动；调大直行更稳，但可能转弯偏晚；不改变单次转向角度。
+POST_TURN_CENTER_THRESHOLD = 12  # 转向结束后，近处线距中心不超过此像素数则先前进一步。
+# 必须两块 ROI 都识线；仅在转向后的判断中生效，前进一步后恢复近、远加权判断。
+# 调大可更早结束原地转向，但允许的偏差也更大；调小对正更严格，可能需要更多次转向。
 
 # 黑线识别与干扰过滤
 ROIS = ((0, 95, 160, 20), (0, 35, 160, 20))  # 每项为 (x, y, 宽, 高)，先近处、后远处。
@@ -50,17 +54,30 @@ MAX_FRAME_MS = 150  # 单帧处理耗时及相邻判断间隔的上限，必须�
 # 必须与主板实际动作文件时长一致，修改动作文件后同步修改；缩短这里不会让动作加速，
 # 只会让程序更早发送下一指令，可能干扰尚未完成的动作；本程序没有动作完成回读。
 ACTION_TIME_MS = {0: 1000, 1: 1300, 3: 750, 4: 750}
-CYCLE_MARGIN_MS = 80  # 前进时长之外的额外余量；调大衔接更保守、间隔更长，调小可能过早发令。
-TURN_SETTLE_MS = 180  # 转向时长之外的站稳等待；调大可等画面稳定，调小可更快重新识线。
-STAND_SETTLE_MS = 150  # 立正时长之外的站稳等待；调大更稳，调小可更快重新识线。
-DECISION_GRACE_MS = 200  # 前进周期结束且无稳定方向时的额外确认时间；有稳定转向时不等待。
+CYCLE_MARGIN_MS = (
+    80  # 前进时长之外的额外余量；调大衔接更保守、间隔更长，调小可能过早发令。
+)
+TURN_SETTLE_MS = (
+    180  # 转向完成后的站稳等待；此期间重新识线，等待结束且判断稳定后才发令。
+)
+STAND_SETTLE_MS = (
+    150  # 立正完成后的站稳等待；同时积累识线结果，避免结束后再额外等一次。
+)
+DECISION_GRACE_MS = (
+    200  # 前进周期结束且无稳定方向时的额外确认时间；有稳定转向时不等待。
+)
 # 调大可容忍短暂丢线或方向变化，但持续丢线后立正也会更晚；不会中途打断当前步态。
 
 # 方向判断稳定性：连续帧数和持续时间必须同时满足；丢线立即清空累计。
 STABLE_FRAMES = 3  # 连续相同方向的最少帧数，至少为 1；调大抗抖，调小反应快。
 STABLE_MS = 100  # 同一方向至少持续的时间；调大抗抖，调小反应快，须同时满足帧数条件。
 START_DELAY_MS = 3000  # 开启运动后、首次发送立正前的准备时间；按实际摆放所需时间调整。
-ACTION_NAMES = {0: "STAND", 1: "FORWARD", 3: "LEFT", 4: "RIGHT"}  # 动作号与显示名称；非灵敏度参数。
+ACTION_NAMES = {
+    0: "STAND",
+    1: "FORWARD",
+    3: "LEFT",
+    4: "RIGHT",
+}  # 动作号与显示名称；非灵敏度参数。
 # 此映射也用于检查动作号；仅修改名称不能改变主板动作，动作号应与主板预存动作一致。
 
 
@@ -69,10 +86,12 @@ def validate_config():
         raise ValueError("Invalid BLACK_THRESHOLD")
     if not 1 <= LINE_CENTER_X <= 158 or not 1 <= TURN_THRESHOLD <= 79:
         raise ValueError("Invalid center or turn threshold")
+    if not 1 <= POST_TURN_CENTER_THRESHOLD <= 79:
+        raise ValueError("Invalid post-turn center threshold")
     if len(ROIS) != 2 or ROIS[0][1] <= ROIS[1][1]:
         raise ValueError("Use near ROI first, far ROI second")
     for x, y, w, h in ROIS:
-        if min(x, y) < 0 or min(w, h) <= 0 or x+w > 160 or y+h > 120:
+        if min(x, y) < 0 or min(w, h) <= 0 or x + w > 160 or y + h > 120:
             raise ValueError("ROI must fit 160x120")
     if not 1 <= MIN_BLOB_WIDTH <= MAX_BLOB_WIDTH <= 160:
         raise ValueError("Invalid blob widths")
@@ -82,8 +101,17 @@ def validate_config():
         raise ValueError("Invalid frame filters")
     if any(ACTION_TIME_MS.get(a, 0) <= 0 for a in ACTION_NAMES):
         raise ValueError("Set positive action durations")
-    if min(CYCLE_MARGIN_MS, TURN_SETTLE_MS, STAND_SETTLE_MS,
-           DECISION_GRACE_MS, STABLE_MS) < 0 or STABLE_FRAMES < 1:
+    if (
+        min(
+            CYCLE_MARGIN_MS,
+            TURN_SETTLE_MS,
+            STAND_SETTLE_MS,
+            DECISION_GRACE_MS,
+            STABLE_MS,
+        )
+        < 0
+        or STABLE_FRAMES < 1
+    ):
         raise ValueError("Invalid timing settings")
 
 
@@ -102,12 +130,16 @@ def detect_line(img):
             roi=roi,
             pixels_threshold=MIN_PIXELS,
             area_threshold=MIN_PIXELS,
-            merge=True
+            merge=True,
         )
-        candidates = [b for b in blobs
-                      if MIN_BLOB_WIDTH <= b.w <= MAX_BLOB_WIDTH
-                      and b.h >= MIN_BLOB_HEIGHT]
-        blob = min(candidates, key=lambda b: abs(b.cx - reference)) if candidates else None
+        candidates = [
+            b
+            for b in blobs
+            if MIN_BLOB_WIDTH <= b.w <= MAX_BLOB_WIDTH and b.h >= MIN_BLOB_HEIGHT
+        ]
+        blob = (
+            min(candidates, key=lambda b: abs(b.cx - reference)) if candidates else None
+        )
         if blob is not None and selected and selected[0] is not None:
             if abs(blob.cx - reference) > MAX_CENTER_JUMP:
                 blob = None
@@ -122,20 +154,26 @@ def detect_line(img):
             img.draw_rectangle(blob.rect, color=255)
             img.draw_cross((blob.cx, blob.cy), color=255)
     img.draw_line((LINE_CENTER_X, 30, LINE_CENTER_X, 119), color=180)
-    img.draw_string((0, 20), "roi:%d/2" % sum(b is not None for b in selected), color=255)
+    img.draw_string(
+        (0, 20), "roi:%d/2" % sum(b is not None for b in selected), color=255
+    )
     if any(blob is None for blob in selected):
         return None, None
     return selected[0].cx, selected[1].cx
 
 
-def choose_action(near_x, far_x):
+def choose_action(near_x, far_x, after_turn=False):
     if near_x is None or far_x is None:
         return None, None
     # 近处偏差为主，远处用于提前判断弯道；单位均为像素。
     # 0.65 为近处权重，0.35 为远处权重；调整时建议两者之和保持为 1。
     # 增大近处权重更关注脚前位置；增大远处权重有助提前判弯，也更受远处误识别影响。
     error = 0.65 * (near_x - LINE_CENTER_X) + 0.35 * (far_x - LINE_CENTER_X)
-    if error < -TURN_THRESHOLD:
+    # 已完成一次转向时，近处对正就先前进，避免远处仍是弯道而反复原地转向。
+    # error 仍保留加权偏差供画面显示；只有此分支按近处偏差判断能否恢复前进。
+    if after_turn and abs(near_x - LINE_CENTER_X) <= POST_TURN_CENTER_THRESHOLD:
+        action = 1
+    elif error < -TURN_THRESHOLD:
         action = 3
     elif error > TURN_THRESHOLD:
         action = 4
@@ -148,6 +186,7 @@ def choose_action(near_x, far_x):
 
 class LineFilter:
     """只返回近期连续稳定的方向；丢线立即使当前判断无效。"""
+
     def __init__(self):
         self.candidate = None
         self.count = 0
@@ -155,7 +194,10 @@ class LineFilter:
         self.last_seen = None
 
     def update(self, action, now):
-        interrupted = self.last_seen is not None and time.ticks_diff(now, self.last_seen) > MAX_FRAME_MS
+        interrupted = (
+            self.last_seen is not None
+            and time.ticks_diff(now, self.last_seen) > MAX_FRAME_MS
+        )
         self.last_seen = now
         if action is None:
             self.candidate, self.count, self.first_seen = None, 0, None
@@ -164,7 +206,10 @@ class LineFilter:
             self.candidate, self.count, self.first_seen = action, 1, now
         else:
             self.count += 1
-        if self.count >= STABLE_FRAMES and time.ticks_diff(now, self.first_seen) >= STABLE_MS:
+        if (
+            self.count >= STABLE_FRAMES
+            and time.ticks_diff(now, self.first_seen) >= STABLE_MS
+        ):
             return action
         return None
 
@@ -184,10 +229,13 @@ class GaitController:
         if self.state == "WALK":
             if stable_action == 1:
                 return 1  # 继续完整步态，不调用立正
-            if stable_action is None and self.elapsed(now) < self.duration + DECISION_GRACE_MS:
+            if (
+                stable_action is None
+                and self.elapsed(now) < self.duration + DECISION_GRACE_MS
+            ):
                 return None
             return 0  # 换方向或持续丢线，仅在周期结束后立正一次
-        # 立正和转向执行期间不使用视觉结果；结束后由新帧重新累计。
+        # 动作完整执行后，在额外站稳时间内累计新判断；站稳时间结束前不会发令。
         if stable_action in (1, 3, 4):
             return stable_action
         return None
@@ -205,16 +253,25 @@ class GaitController:
             self.duration = ACTION_TIME_MS[action] + TURN_SETTLE_MS
 
     def discard_observation(self, frame_started):
-        # 直行时持续识线，为下个周期作准备；立正/转向期间的画面不参与决策。
-        return self.state in ("STAND", "TURN") and self.elapsed(frame_started) < self.duration
+        # 只丢弃立正/转向动作尚未执行完时开始采集的画面；站稳等待可与识线累计重叠。
+        if self.state == "STAND":
+            action_duration = self.duration - STAND_SETTLE_MS
+        elif self.state == "TURN":
+            action_duration = self.duration - TURN_SETTLE_MS
+        else:
+            return False
+        return self.elapsed(frame_started) < action_duration
 
 
 def run():
     validate_config()
     import sensor
+
     sensor.reset()
     sensor.set_pixformat(sensor.GRAYSCALE)
-    sensor.set_framesize(sensor.QQVGA)  # 固定 160×120；更改分辨率需同步调整 ROI、中心和像素门槛。
+    sensor.set_framesize(
+        sensor.QQVGA
+    )  # 固定 160×120；更改分辨率需同步调整 ROI、中心和像素门槛。
     sensor.set_hmirror(H_MIRROR)
     sensor.set_vflip(V_FLIP)
     sensor.skip_frames(time=2000)  # 上电后等待 2000 ms，让相机自动参数先稳定。
@@ -227,10 +284,10 @@ def run():
     controller = GaitController()
     if ENABLE_MOTION:
         from pyb import UART
+
         # UART3、9600 波特率、8 数据位、无校验、1 停止位；须与接线及主板串口配置一致。
         # timeout=100、timeout_char=10 为 UART 超时配置，单位 ms；不控制行走速度或转向角度。
-        uart = UART(3, 9600, bits=8, parity=None, stop=1,
-                    timeout=100, timeout_char=10)
+        uart = UART(3, 9600, bits=8, parity=None, stop=1, timeout=100, timeout_char=10)
         print("MOTION: stand first, then follow line. Prepare for 3 seconds.")
         time.sleep_ms(START_DELAY_MS)
         packet = action_packet(0)
@@ -248,7 +305,9 @@ def run():
         now = time.ticks_ms()
         if time.ticks_diff(now, started) > MAX_FRAME_MS:
             near_x, far_x = None, None
-        action, error = choose_action(near_x, far_x)
+        action, error = choose_action(
+            near_x, far_x, after_turn=controller.state == "TURN"
+        )
         observed = None if controller.discard_observation(started) else action
         stable_action = direction.update(observed, now)
         if uart is not None:
@@ -258,10 +317,13 @@ def run():
                 if uart.write(packet) != len(packet):
                     raise OSError("UART short write; check robot before restarting")
                 controller.mark_sent(next_action, time.ticks_ms())
-                # 直行衔接保留视觉累计；站稳/转向后必须重新观察。
+                # 直行衔接保留视觉累计；新立正/转向指令清空累计，动作完成后重新观察。
                 if next_action != 1:
                     direction = LineFilter()
-                print("TX %s: %s" % (ACTION_NAMES[next_action], " ".join("%02X" % b for b in packet)))
+                print(
+                    "TX %s: %s"
+                    % (ACTION_NAMES[next_action], " ".join("%02X" % b for b in packet))
+                )
 
         mode = "PREVIEW" if uart is None else controller.state
         plan = "NO LINE" if action is None else ACTION_NAMES[action]
@@ -269,8 +331,11 @@ def run():
         if error is None:
             img.draw_string((0, 10), "Need both ROIs", color=255)
         else:
-            img.draw_string((0, 10), "N:%d F:%d E:%d" % (near_x, far_x, int(error)), color=255)
+            img.draw_string(
+                (0, 10), "N:%d F:%d E:%d" % (near_x, far_x, int(error)), color=255
+            )
 
 
 if __name__ == "__main__":
     run()
+
