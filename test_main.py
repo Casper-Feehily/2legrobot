@@ -21,7 +21,7 @@ class EndSimulation(Exception):
 
 
 def run_robot(near_after_turn, far_after_turn, packet_limit=3,
-              initial_line=(40, 30), turn_settle_ms=None, stand_settle_ms=None):
+              initial_line=(40, 30), turn_settle_ms=None, stand_settle_ms=None, direct_turn=True):
     robot, namespace = load_robot()
     packets = []
     elapsed = [0]
@@ -32,7 +32,8 @@ def run_robot(near_after_turn, far_after_turn, packet_limit=3,
         elapsed[0] += 50
         if frames[0] > 200:
             raise EndSimulation()
-        return SimpleNamespace(draw_string=lambda *args, **kwargs: None)
+        return SimpleNamespace(**{name: (lambda *args, **kwargs: None) for name in
+                                  ("draw_string", "draw_rectangle", "draw_line", "draw_cross")})
 
     def write(packet):
         packets.append((elapsed[0], bytes(packet)))
@@ -53,6 +54,7 @@ def run_robot(near_after_turn, far_after_turn, packet_limit=3,
         set_auto_exposure=lambda value: None,
     )
     namespace["ENABLE_MOTION"] = True
+    namespace["DIRECT_TURN_TRANSITION"] = direct_turn
     if turn_settle_ms is not None:
         namespace["TURN_SETTLE_MS"] = turn_settle_ms
     if stand_settle_ms is not None:
@@ -62,9 +64,14 @@ def run_robot(near_after_turn, far_after_turn, packet_limit=3,
         ticks_diff=lambda now, before: now - before,
         sleep_ms=lambda duration: None,
     )
-    namespace["detect_line"] = lambda image: (
-        initial_line if len(packets) < 2 else (near_after_turn, far_after_turn)
-    )
+    def detect(image):
+        near, far = initial_line if len(packets) < 2 else (near_after_turn, far_after_turn)
+        return robot.TrackObservation((
+            (near, 105) if near is not None else None,
+            ((near + far) / 2, 75) if near is not None and far is not None else None,
+            (far, 45) if far is not None else None,
+        ))
+    namespace["detect_line"] = detect
     with patch.dict(sys.modules, {
         "sensor": sensor,
         "pyb": SimpleNamespace(UART=lambda *args, **kwargs: SimpleNamespace(write=write)),
@@ -88,9 +95,13 @@ class TurnRecoveryTests(unittest.TestCase):
 
     def test_recovery_does_not_permanently_disable_curve_detection(self):
         packets = run_robot(80, 30, packet_limit=5)
+        self.assertEqual([packet[4] for _, packet in packets], [0, 3, 1, 3, 1])
+
+    def test_direct_turn_switch_restores_stand_transition(self):
+        packets = run_robot(80, 30, packet_limit=5, direct_turn=False)
         self.assertEqual([packet[4] for _, packet in packets], [0, 3, 1, 0, 3])
 
-    def test_real_loop_waits_for_both_rois_after_turn(self):
+    def test_real_loop_waits_for_two_reliable_rois_after_turn(self):
         packets = run_robot(80, None)
         self.assertEqual([packet[4] for _, packet in packets], [0, 3])
 
@@ -100,19 +111,19 @@ class TurnRecoveryTests(unittest.TestCase):
 
     def test_loop_does_not_accumulate_direction_while_turn_is_moving(self):
         packets = run_robot(80, 30, turn_settle_ms=0)
-        # A 750 ms turn must be followed by >=100 ms of fresh stable observations.
-        self.assertGreaterEqual(packets[2][0] - packets[1][0], 850)
+        # A 750 ms turn must be followed by >=40 ms of fresh stable observations.
+        self.assertGreaterEqual(packets[2][0] - packets[1][0], 790)
 
     def test_loop_does_not_accumulate_direction_while_stand_is_moving(self):
         packets = run_robot(80, 30, stand_settle_ms=0)
-        # A 1000 ms stand must be followed by >=100 ms of fresh observations.
-        self.assertGreaterEqual(packets[1][0] - packets[0][0], 1100)
+        # A 1000 ms stand must be followed by >=40 ms of fresh observations.
+        self.assertGreaterEqual(packets[1][0] - packets[0][0], 1040)
 
     def test_loop_overlaps_turn_settling_and_stability_without_early_dispatch(self):
         packets = run_robot(80, 30)
         gap = packets[2][0] - packets[1][0]
-        self.assertGreaterEqual(gap, 930)  # Full 750 ms action plus 180 ms settling.
-        self.assertLess(gap, 1030)  # No extra 100 ms stable-window wait afterward.
+        self.assertGreaterEqual(gap, 810)  # Full 750 ms action plus 60 ms settling.
+        self.assertLess(gap, 930)  # Faster than the previous 180 ms settling window.
 
     def test_loop_respects_full_stand_settling_before_first_turn(self):
         packets = run_robot(80, 30)
@@ -160,8 +171,8 @@ class TurnRecoveryTests(unittest.TestCase):
                 controller.mark_sent(action, 1000)
                 self.assertTrue(controller.discard_observation(1749))
                 self.assertFalse(controller.discard_observation(1750))
-                self.assertIsNone(controller.next_action(1, 1929))
-                self.assertEqual(controller.next_action(1, 1930), 1)
+                self.assertIsNone(controller.next_action(1, 1809))
+                self.assertEqual(controller.next_action(1, 1810), 1)
 
     def test_stand_observations_overlap_settle_without_early_dispatch(self):
         robot, namespace = load_robot()
@@ -172,6 +183,42 @@ class TurnRecoveryTests(unittest.TestCase):
         self.assertFalse(controller.discard_observation(2000))
         self.assertIsNone(controller.next_action(1, 2149))
         self.assertEqual(controller.next_action(1, 2150), 1)
+
+
+class HandoffTests(unittest.TestCase):
+    def setUp(self):
+        self.robot, self.namespace = load_robot()
+        self.namespace["time"] = SimpleNamespace(ticks_diff=lambda now, before: now - before)
+
+    def test_both_turns_start_only_after_full_walk_and_margin(self):
+        for turn in (3, 4):
+            with self.subTest(turn=turn):
+                controller = self.robot.GaitController()
+                controller.mark_sent(1, 1000)
+                self.assertIsNone(controller.next_action(turn, 2379))
+                self.assertEqual(controller.next_action(turn, 2380), turn)
+
+    def test_persistent_loss_stands_once_after_completing_walk(self):
+        controller = self.robot.GaitController()
+        controller.mark_sent(1, 1000)
+        self.assertIsNone(controller.next_action(None, 2579))
+        self.assertEqual(controller.next_action(None, 2580), 0)
+        controller.mark_sent(0, 2580)
+        self.assertIsNone(controller.next_action(None, 5000))
+
+    def test_unstable_turn_is_not_sent(self):
+        direction = self.robot.LineFilter()
+        self.assertIsNone(direction.update(3, 0))
+        self.assertIsNone(direction.update(4, 40))
+        self.assertEqual(direction.update(4, 80), 4)
+        self.assertIsNone(direction.update(None, 120))
+        self.assertIsNone(direction.update(4, 160))
+
+    def test_long_frame_gap_resets_direction_confirmation(self):
+        direction = self.robot.LineFilter()
+        self.assertIsNone(direction.update(3, 0))
+        self.assertEqual(direction.update(3, 40), 3)
+        self.assertIsNone(direction.update(3, 191))
 
 
 if __name__ == "__main__":

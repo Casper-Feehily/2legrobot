@@ -3,8 +3,10 @@
 主板中需已下载 0=立正、1=前进、3=左转、4=右转。
 在 OpenMV IDE 打开整个文件运行；先预览，确认识线后改 ENABLE_MOTION=True。
 直行时每次播放1号一次，周期之间不插入0号立正。
-准备转向或持续丢线时，等当前周期结束，先立正，再重新判断方向。
-转向结束后，近处线已回正且两块区域均识线时，先前进一周期，减少重复原地转向。
+默认在完整前进结束后直接接转向；关闭 DIRECT_TURN_TRANSITION 可恢复立正过渡。
+持续丢线仍等当前前进周期结束后立正。
+三框至少两处可信纵向线才允许行走；横线污染的框不作为方向中心。
+转向结束后，实际近处线已回正时，先前进一周期，减少重复原地转向。
 使用已验证的 UART3 / 9600 / 8N1 接线；不修改主板固件。
 本版按原始动作时间计时，没有动作完成回读；周期衔接会有短小间隔，
 并非主板内无限循环。动作文件时长修改后应同步修改 ACTION_TIME_MS。
@@ -17,7 +19,7 @@ import time
 # 图像固定为 160×120；以下位置、宽高和偏差均为图像像素，时间均为毫秒。
 
 # 运动与画面方向
-ENABLE_MOTION = False  # False：仅预览、不发送动作；True：延时后先立正，再开始循迹。
+ENABLE_MOTION = True  # False：仅预览、不发送动作；True：延时后先立正，再开始循迹。
 BLACK_THRESHOLD = (0, 64)  # 黑色灰度范围，0 最黑、255 最白；通常保持下限 0，仅调上限。
 # 上限调大可识别较浅的线，但易混入阴影；调小筛选更严格，但可能漏掉黑线。
 
@@ -30,20 +32,22 @@ LINE_CENTER_X = 80  # 期望黑线所在的横坐标，可校准摄像头安装�
 TURN_THRESHOLD = 12  # 加权偏差超过 ±此值才转向，等于边界仍直行；允许 1～79。
 # 调小更敏感、易左右摆动；调大直行更稳，但可能转弯偏晚；不改变单次转向角度。
 POST_TURN_CENTER_THRESHOLD = 12  # 转向结束后，近处线距中心不超过此像素数则先前进一步。
-# 必须两块 ROI 都识线；仅在转向后的判断中生效，前进一步后恢复近、远加权判断。
+# 必须至少两框可信且近处实际识线；仅在转向后生效，前进一步后恢复加权判断。
 # 调大可更早结束原地转向，但允许的偏差也更大；调小对正更严格，可能需要更多次转向。
 
 # 黑线识别与干扰过滤
-ROIS = ((0, 95, 160, 20), (0, 35, 160, 20))  # 每项为 (x, y, 宽, 高)，先近处、后远处。
-# y 越大越靠下；两块区域都必须识到线，且均应在 160×120 图像内。
+ROIS = ((0, 95, 160, 20), (0, 65, 160, 20), (0, 35, 160, 20))  # 近、中、远。
+# 每项为 (x, y, 宽, 高)，y 越大越靠下；三框应互不重叠且都在 160×120 内。
+# 一个框被横线遮挡时使用另外两个；不能只凭一个框或历史方向盲走。
 # 调整位置以适应摄像头俯角和赛道；加大区域可覆盖更多画面，也可能增加干扰和耗时。
 MIN_PIXELS = 20  # 黑块像素数量及外接矩形面积的筛选下限；调大滤噪，调小保留细线。
 MIN_BLOB_WIDTH = 2  # 黑块最小宽度；调大可滤细小干扰，但容易漏掉远处较细的线。
 MAX_BLOB_WIDTH = 65  # 黑块最大宽度；调小排除大片黑影，调大容纳宽线或弯道。
 MIN_BLOB_HEIGHT = 4  # 黑块最小高度；调大滤掉矮小噪点，但线刚进入 ROI 时容易漏检。
+RECOVERY_STRIP_HEIGHT = 4  # 宽黑块干扰且不足两框时，重查该框上下各此高度的窄带。
 
 MAX_CENTER_JUMP = 60  # 同一帧近、远黑线中心允许的最大横向差，允许 1～160。
-# 调小可排除不相关黑块，调大可容纳急弯；这不是相邻帧之间的中心移动限制。
+# 以完整近远纵向间距折算；中框和窄带按实际间距缩小限值，避免拼接不相关黑块。
 
 
 MAX_FRAME_MS = 150  # 单帧处理耗时及相邻判断间隔的上限，必须大于 0。
@@ -57,8 +61,10 @@ ACTION_TIME_MS = {0: 1000, 1: 1300, 3: 750, 4: 750}
 CYCLE_MARGIN_MS = (
     80  # 前进时长之外的额外余量；调大衔接更保守、间隔更长，调小可能过早发令。
 )
+STRAIGHT_MARGIN_MS = 40  # 三框确认直道时的前进余量；只减少间隔，不缩短步态本身。
+DIRECT_TURN_TRANSITION = True  # True：完整前进后直接转向；False：先执行立正过渡。
 TURN_SETTLE_MS = (
-    180  # 转向完成后的站稳等待；此期间重新识线，等待结束且判断稳定后才发令。
+    60  # 转向完成后的站稳等待；此期间重新识线，等待结束且判断稳定后才发令。
 )
 STAND_SETTLE_MS = (
     150  # 立正完成后的站稳等待；同时积累识线结果，避免结束后再额外等一次。
@@ -69,8 +75,13 @@ DECISION_GRACE_MS = (
 # 调大可容忍短暂丢线或方向变化，但持续丢线后立正也会更晚；不会中途打断当前步态。
 
 # 方向判断稳定性：连续帧数和持续时间必须同时满足；丢线立即清空累计。
-STABLE_FRAMES = 3  # 连续相同方向的最少帧数，至少为 1；调大抗抖，调小反应快。
-STABLE_MS = 100  # 同一方向至少持续的时间；调大抗抖，调小反应快，须同时满足帧数条件。
+STABLE_FRAMES = 2  # 连续相同方向的最少帧数，至少为 1；调大抗抖，调小反应快。
+STABLE_MS = 40  # 同一方向至少持续的时间；调大抗抖，调小反应快，须同时满足帧数条件。
+# 直道判定依次限制：近处偏差、近远横向差、中点到近远连线的横向偏差（像素）。
+STRAIGHT_ENTER_LIMITS = (8, 8, 4)
+STRAIGHT_EXIT_LIMITS = (12, 14, 8)  # 退出阈值较宽，避免在边界来回切换模式。
+STRAIGHT_STABLE_FRAMES = 3  # 只有三框均可信且无横线/重检，才累计直道确认。
+STRAIGHT_STABLE_MS = 100  # 进入直道须同时满足帧数与持续时间；有干扰立即退出快模式。
 START_DELAY_MS = 3000  # 开启运动后、首次发送立正前的准备时间；按实际摆放所需时间调整。
 ACTION_NAMES = {
     0: "STAND",
@@ -88,11 +99,16 @@ def validate_config():
         raise ValueError("Invalid center or turn threshold")
     if not 1 <= POST_TURN_CENTER_THRESHOLD <= 79:
         raise ValueError("Invalid post-turn center threshold")
-    if len(ROIS) != 2 or ROIS[0][1] <= ROIS[1][1]:
-        raise ValueError("Use near ROI first, far ROI second")
+    if len(ROIS) != 3:
+        raise ValueError("Use three ROIs: near, middle, far")
     for x, y, w, h in ROIS:
         if min(x, y) < 0 or min(w, h) <= 0 or x + w > 160 or y + h > 120:
             raise ValueError("ROI must fit 160x120")
+    for near, far in zip(ROIS, ROIS[1:]):
+        if far[1] + far[3] > near[1]:
+            raise ValueError("ROIs must be ordered near to far without overlap")
+    if not 1 <= RECOVERY_STRIP_HEIGHT <= min(r[3] // 2 for r in ROIS):
+        raise ValueError("Invalid recovery strip height")
     if not 1 <= MIN_BLOB_WIDTH <= MAX_BLOB_WIDTH <= 160:
         raise ValueError("Invalid blob widths")
     if MIN_PIXELS < 1 or not 1 <= MIN_BLOB_HEIGHT <= 120:
@@ -101,6 +117,14 @@ def validate_config():
         raise ValueError("Invalid frame filters")
     if any(ACTION_TIME_MS.get(a, 0) <= 0 for a in ACTION_NAMES):
         raise ValueError("Set positive action durations")
+    if not 0 <= STRAIGHT_MARGIN_MS <= CYCLE_MARGIN_MS:
+        raise ValueError("Invalid straight margin")
+    if len(STRAIGHT_ENTER_LIMITS) != 3 or len(STRAIGHT_EXIT_LIMITS) != 3:
+        raise ValueError("Set three straight thresholds")
+    if any(not 0 <= a <= b <= 160 for a, b in zip(STRAIGHT_ENTER_LIMITS, STRAIGHT_EXIT_LIMITS)):
+        raise ValueError("Invalid straight hysteresis")
+    if STRAIGHT_STABLE_FRAMES < 1 or STRAIGHT_STABLE_MS < 0 or START_DELAY_MS < 0:
+        raise ValueError("Invalid confirmation or startup timing")
     if (
         min(
             CYCLE_MARGIN_MS,
@@ -121,45 +145,103 @@ def action_packet(action_id):
     return bytes((0x55, 0x55, 0x05, 0x06, action_id, 0x01, 0x00))
 
 
-def detect_line(img):
-    selected = []
-    reference = LINE_CENTER_X
-    for roi in ROIS:
-        blobs = img.find_blobs(
-            [BLACK_THRESHOLD],
-            roi=roi,
-            pixels_threshold=MIN_PIXELS,
-            area_threshold=MIN_PIXELS,
-            merge=True,
-        )
-        candidates = [
-            b
-            for b in blobs
-            if MIN_BLOB_WIDTH <= b.w <= MAX_BLOB_WIDTH and b.h >= MIN_BLOB_HEIGHT
-        ]
-        blob = (
-            min(candidates, key=lambda b: abs(b.cx - reference)) if candidates else None
-        )
-        if blob is not None and selected and selected[0] is not None:
-            if abs(blob.cx - reference) > MAX_CENTER_JUMP:
-                blob = None
-        selected.append(blob)
-        if blob is not None:
-            reference = blob.cx
+def roi_y(index):
+    return ROIS[index][1] + ROIS[index][3] / 2
 
-    for roi in ROIS:
-        img.draw_rectangle(roi, color=100)
-    for blob in selected:
-        if blob is not None:
-            img.draw_rectangle(blob.rect, color=255)
-            img.draw_cross((blob.cx, blob.cy), color=255)
-    img.draw_line((LINE_CENTER_X, 30, LINE_CENTER_X, 119), color=180)
-    img.draw_string(
-        (0, 20), "roi:%d/2" % sum(b is not None for b in selected), color=255
+
+def compatible_points(a, b):
+    # 同一帧内方向约束：距离越近，允许的中心差越小。
+    return a[1] != b[1] and abs(a[0] - b[0]) * (roi_y(0) - roi_y(2)) <= (
+        MAX_CENTER_JUMP * abs(a[1] - b[1])
     )
-    if any(blob is None for blob in selected):
-        return None, None
-    return selected[0].cx, selected[1].cx
+
+
+def project_x(a, b, y):
+    return a[0] + (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1])
+
+
+class TrackObservation:
+    """一帧的实际观测与补算坐标；补算不增加可信框数量。"""
+
+    def __init__(self, points=(None, None, None), wide=(False, False, False),
+                 recovered=(False, False, False)):
+        self.points = tuple(points)
+        self.wide = tuple(wide)
+        self.recovered = tuple(recovered)
+        self.near_x, self.far_x = None, None
+        valid = [p for p in self.points if p is not None]
+        if len(valid) < 2:
+            return
+        if any(not (0 <= p[0] < 160 and 0 <= p[1] < 120) for p in valid):
+            return
+        for i, a in enumerate(valid):
+            if any(not compatible_points(a, b) for b in valid[i + 1:]):
+                return
+        near = self.points[0][0] if self.points[0] else project_x(valid[0], valid[-1], roi_y(0))
+        far = self.points[2][0] if self.points[2] else project_x(valid[0], valid[-1], roi_y(2))
+        if 0 <= near < 160 and 0 <= far < 160 and abs(near - far) <= MAX_CENTER_JUMP:
+            self.near_x, self.far_x = near, far
+
+
+def find_candidates(img, roi, strip=False):
+    # 窄带只有几行，像素下限需同步缩小，否则合法细线也会被过滤。
+    minimum = min(MIN_PIXELS, MIN_BLOB_WIDTH * roi[3]) if strip else MIN_PIXELS
+    blobs = img.find_blobs(
+        [BLACK_THRESHOLD], roi=roi, pixels_threshold=minimum,
+        area_threshold=minimum, merge=True,
+    )
+    height = roi[3] if strip else MIN_BLOB_HEIGHT
+    return (
+        [(b.cx, b.cy) for b in blobs
+         if MIN_BLOB_WIDTH <= b.w <= MAX_BLOB_WIDTH and b.h >= height],
+        any(b.w > MAX_BLOB_WIDTH for b in blobs),
+    )
+
+
+def pick_point(candidates, known):
+    valid = [p for p in known if p is not None]
+    reference = valid[-1][0] if valid else LINE_CENTER_X
+    candidates = [p for p in candidates if all(compatible_points(p, q) for q in valid)]
+    return min(candidates, key=lambda p: abs(p[0] - reference)) if candidates else None
+
+
+def detect_line(img):
+    points, wide, recovered = [], [], [False, False, False]
+    for roi in ROIS:
+        candidates, interference = find_candidates(img, roi)
+        points.append(pick_point(candidates, points))
+        wide.append(interference)
+
+    if sum(p is not None for p in points) < 2:
+        for index, (x, y, w, h) in enumerate(ROIS):
+            if points[index] is not None or not wide[index]:
+                continue
+            edges = []
+            for top in (y, y + h - RECOVERY_STRIP_HEIGHT):
+                candidates, _ = find_candidates(
+                    img, (x, top, w, RECOVERY_STRIP_HEIGHT), strip=True
+                )
+                point = pick_point(candidates, points + edges)
+                if point is not None:
+                    edges.append(point)
+            if edges:
+                points[index] = (sum(p[0] for p in edges) / len(edges),
+                                 sum(p[1] for p in edges) / len(edges))
+                recovered[index] = True
+    return TrackObservation(points, wide, recovered)
+
+
+def draw_tracking(img, track):
+    # 所有检测和重检结束后才绘制，避免边框及文字污染窄带识别。
+    for roi, point, wide in zip(ROIS, track.points, track.wide):
+        img.draw_rectangle(roi, color=200 if wide else 100)
+        if point is not None:
+            img.draw_cross((int(point[0]), int(point[1])), color=255)
+    img.draw_line((LINE_CENTER_X, 30, LINE_CENTER_X, 119), color=180)
+    flags = "".join("R" if r else "X" if w else "+" if p else "-"
+                    for p, w, r in zip(track.points, track.wide, track.recovered))
+    img.draw_string((0, 20), "roi:%d/3 %s" % (
+        sum(p is not None for p in track.points), flags), color=255)
 
 
 def choose_action(near_x, far_x, after_turn=False):
@@ -214,33 +296,81 @@ class LineFilter:
         return None
 
 
+class RoadModeFilter:
+    """直道须持续确认；弯道、遮挡和丢线立即撤销快速衔接。"""
+
+    def __init__(self):
+        self.mode = "CURVE"
+        self.count = 0
+        self.first_seen = None
+        self.last_seen = None
+
+    def update(self, track, now):
+        if self.last_seen is not None and time.ticks_diff(now, self.last_seen) > MAX_FRAME_MS:
+            self.mode, self.count, self.first_seen = "CURVE", 0, None
+        self.last_seen = now
+        if track is None or track.near_x is None:
+            mode = "LOST"
+        elif any(track.wide) or any(track.recovered):
+            mode = "CROSS"
+        elif any(p is None for p in track.points):
+            mode = "CURVE"
+        else:
+            near, middle, far = track.points
+            measures = (abs(near[0] - LINE_CENTER_X), abs(near[0] - far[0]),
+                        abs(middle[0] - project_x(near, far, middle[1])))
+            if self.mode == "STRAIGHT" and all(
+                value <= limit for value, limit in zip(measures, STRAIGHT_EXIT_LIMITS)
+            ):
+                return self.mode
+            if all(value <= limit for value, limit in zip(measures, STRAIGHT_ENTER_LIMITS)):
+                if self.count == 0:
+                    self.first_seen = now
+                self.count += 1
+                self.mode = "CURVE"
+                if (self.count >= STRAIGHT_STABLE_FRAMES
+                        and time.ticks_diff(now, self.first_seen) >= STRAIGHT_STABLE_MS):
+                    self.mode = "STRAIGHT"
+                return self.mode
+            mode = "CURVE"
+        self.mode, self.count, self.first_seen = mode, 0, None
+        return self.mode
+
+
 class GaitController:
     def __init__(self):
         self.state = "IDLE"
         self.sent_at = None
         self.duration = 0
+        self.last_interval_ms = 0
 
     def elapsed(self, now):
         return 0 if self.sent_at is None else time.ticks_diff(now, self.sent_at)
 
-    def next_action(self, stable_action, now):
-        if self.state != "IDLE" and self.elapsed(now) < self.duration:
+    def next_action(self, stable_action, now, road_mode="CURVE"):
+        ready_after = self.duration
+        if self.state == "WALK" and stable_action == 1 and road_mode == "STRAIGHT":
+            ready_after = ACTION_TIME_MS[1] + STRAIGHT_MARGIN_MS
+        if self.state != "IDLE" and self.elapsed(now) < ready_after:
             return None
         if self.state == "WALK":
             if stable_action == 1:
                 return 1  # 继续完整步态，不调用立正
+            if stable_action in (3, 4) and DIRECT_TURN_TRANSITION:
+                return stable_action  # 当前完整步态已结束，不再插入一秒立正
             if (
                 stable_action is None
                 and self.elapsed(now) < self.duration + DECISION_GRACE_MS
             ):
                 return None
-            return 0  # 换方向或持续丢线，仅在周期结束后立正一次
+            return 0  # 关闭直接衔接时换方向，或持续丢线：周期结束后立正一次
         # 动作完整执行后，在额外站稳时间内累计新判断；站稳时间结束前不会发令。
         if stable_action in (1, 3, 4):
             return stable_action
         return None
 
     def mark_sent(self, action, now):
+        self.last_interval_ms = self.elapsed(now)
         self.sent_at = now
         if action == 1:
             self.state = "WALK"
@@ -295,23 +425,28 @@ def run():
             raise OSError("UART short write; check robot before restarting")
         controller.mark_sent(0, time.ticks_ms())
     else:
-        print("PREVIEW only. Check roi:2/2 and LEFT/RIGHT/FORWARD.")
+        print("PREVIEW only. Check roi:3/3 and LEFT/RIGHT/FORWARD.")
 
     direction = LineFilter()
+    road = RoadModeFilter()
     while True:
         started = time.ticks_ms()
         img = sensor.snapshot()
-        near_x, far_x = detect_line(img)
+        track = detect_line(img)
         now = time.ticks_ms()
         if time.ticks_diff(now, started) > MAX_FRAME_MS:
-            near_x, far_x = None, None
+            track = TrackObservation()
+        near_x, far_x = track.near_x, track.far_x
         action, error = choose_action(
-            near_x, far_x, after_turn=controller.state == "TURN"
+            near_x, far_x,
+            after_turn=controller.state == "TURN" and track.points[0] is not None,
         )
-        observed = None if controller.discard_observation(started) else action
+        discard = controller.discard_observation(started)
+        observed = None if discard else action
+        road_mode = road.update(None if discard else track, now)
         stable_action = direction.update(observed, now)
         if uart is not None:
-            next_action = controller.next_action(stable_action, now)
+            next_action = controller.next_action(stable_action, now, road_mode)
             if next_action is not None:
                 packet = action_packet(next_action)
                 if uart.write(packet) != len(packet):
@@ -320,22 +455,26 @@ def run():
                 # 直行衔接保留视觉累计；新立正/转向指令清空累计，动作完成后重新观察。
                 if next_action != 1:
                     direction = LineFilter()
+                    road = RoadModeFilter()
                 print(
-                    "TX %s: %s"
-                    % (ACTION_NAMES[next_action], " ".join("%02X" % b for b in packet))
+                    "TX %s gap=%dms %s: %s"
+                    % (ACTION_NAMES[next_action], controller.last_interval_ms,
+                       road_mode, " ".join("%02X" % b for b in packet))
                 )
 
         mode = "PREVIEW" if uart is None else controller.state
         plan = "NO LINE" if action is None else ACTION_NAMES[action]
+        draw_tracking(img, track)
+        img.draw_string((0, 30), "%s dt:%dms" % (
+            "WAIT" if discard else road_mode, controller.last_interval_ms), color=255)
         img.draw_string((0, 0), "%s %s" % (mode, plan), color=255)
         if error is None:
-            img.draw_string((0, 10), "Need both ROIs", color=255)
+            img.draw_string((0, 10), "Need 2 valid ROIs", color=255)
         else:
             img.draw_string(
-                (0, 10), "N:%d F:%d E:%d" % (near_x, far_x, int(error)), color=255
+                (0, 10), "N:%d F:%d E:%d" % (int(near_x), int(far_x), int(error)), color=255
             )
 
 
 if __name__ == "__main__":
     run()
-
