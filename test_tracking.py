@@ -283,7 +283,7 @@ class CameraLoopTests(unittest.TestCase):
         packets = run_images(lambda now, sent: centered_line(), packet_limit=3,
                              observation_factory=observation)
         self.assertEqual([p[4] for _, p in packets], [0, 3, 3])
-        self.assertGreaterEqual(packets[2][0] - packets[1][0], 810)
+        self.assertGreaterEqual(packets[2][0] - packets[1][0], 910)
         self.assertLess(packets[2][0] - packets[1][0], 930)
 
     def test_preview_never_transmits_actions(self):

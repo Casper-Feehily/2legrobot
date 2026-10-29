@@ -122,8 +122,8 @@ class TurnRecoveryTests(unittest.TestCase):
     def test_loop_overlaps_turn_settling_and_stability_without_early_dispatch(self):
         packets = run_robot(80, 30)
         gap = packets[2][0] - packets[1][0]
-        self.assertGreaterEqual(gap, 810)  # Full 750 ms action plus 60 ms settling.
-        self.assertLess(gap, 930)  # Faster than the previous 180 ms settling window.
+        self.assertGreaterEqual(gap, 910)  # Full 750 ms action plus 160 ms settling.
+        self.assertLess(gap, 960)  # Dispatch within one 50 ms frame after settling.
 
     def test_loop_respects_full_stand_settling_before_first_turn(self):
         packets = run_robot(80, 30)
@@ -171,8 +171,8 @@ class TurnRecoveryTests(unittest.TestCase):
                 controller.mark_sent(action, 1000)
                 self.assertTrue(controller.discard_observation(1749))
                 self.assertFalse(controller.discard_observation(1750))
-                self.assertIsNone(controller.next_action(1, 1809))
-                self.assertEqual(controller.next_action(1, 1810), 1)
+                self.assertIsNone(controller.next_action(1, 1909))
+                self.assertEqual(controller.next_action(1, 1910), 1)
 
     def test_stand_observations_overlap_settle_without_early_dispatch(self):
         robot, namespace = load_robot()

@@ -1,0 +1,22 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<NewDataSet>
+  <Type>BUS Servo</Type>
+  <Table>
+    <ID>1</ID>
+    <Move>#1 P537 #2 P500 #3 P443 #4 P556 #5 P500 #6 P443</Move>
+    <Time>T140</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>2</ID>
+    <Move>#1 P556 #2 P500 #3 P443 #4 P668 #5 P668 #6 P500</Move>
+    <Time>T100</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>3</ID>
+    <Move>#1 P500 #2 P500 #3 P500 #4 P631 #5 P706 #6 P584</Move>
+    <Time>T180</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>4</ID>
+    <Move>#1 P500 #2 P500 #3 P500 #4 P500 #5 P500 #6 P500</Move>
+    <Time>T180</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+  </Table>
+</NewDataSet>

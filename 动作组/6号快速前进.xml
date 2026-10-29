@@ -1,0 +1,38 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<NewDataSet>
+  <Type>BUS Servo</Type>
+  <Table>
+    <ID>1</ID>
+    <Move>#1 P462 #2 P312 #3 P331 #4 P500 #5 P500 #6 P500</Move>
+    <Time>T160</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>2</ID>
+    <Move>#1 P500 #2 P406 #3 P415 #4 P593 #5 P593 #6 P500</Move>
+    <Time>T170</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>3</ID>
+    <Move>#1 P500 #2 P500 #3 P500 #4 P706 #5 P687 #6 P471</Move>
+    <Time>T170</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>4</ID>
+    <Move>#1 P500 #2 P500 #3 P500 #4 P650 #5 P743 #6 P612</Move>
+    <Time>T120</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>5</ID>
+    <Move>#1 P500 #2 P500 #3 P500 #4 P520 #5 P650 #6 P640</Move>
+    <Time>T140</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>6</ID>
+    <Move>#1 P406 #2 P406 #3 P500 #4 P500 #5 P593 #6 P584</Move>
+    <Time>T170</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>7</ID>
+    <Move>#1 P312 #2 P312 #3 P528 #4 P500 #5 P500 #6 P500</Move>
+    <Time>T170</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+    <ID>8</ID>
+    <Move>#1 P349 #2 P256 #3 P387 #4 P500 #5 P500 #6 P500</Move>
+    <Time>T120</Time>
+    <position>POS1X=135Y=2 POS2X=279Y=23 POS3X=315Y=123 POS4X=409Y=221 POS5X=285Y=321 POS6X=337Y=419</position>
+  </Table>
+</NewDataSet>
