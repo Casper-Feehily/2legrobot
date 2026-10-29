@@ -1,4 +1,14 @@
-"""LS-6A 原厂固件循迹 第五版（v5.1）：三框 + 直道沿用第四版 + 弯道"成组转向"。
+"""LS-6A 原厂固件循迹 第五版（v5.2）：三框 + 直道沿用第四版 + 弯道"成组转向"。
+
+v5.2 相对 v5.1 的改动（实测反馈：弯道一次转两拍、转多了，然后走到弦线中点就反向修）：
+F. 新增"弦段锁"C-CHORD。一组弯道转向发完后，只要偏差翻到了转向的另一侧（就是转过头了），
+   接下来只许前进，不许反向修，直到满足三件事之一：
+     - 近框偏差落回 CHORD_RELEASE_PX 带内（= 已经走回线上）；
+     - 偏差自己又回到转向那一侧（= 已经穿回线上，或者压根没转够，交给常规逻辑）；
+     - 已经直走了 CHORD_HOLD_MAX_PACKETS 拍（安全上限，防止一路走飞）。
+   原理：过转之后车头指向弧线内侧，走的是"两个节点之间的弦"，弦本来就切在弧内侧，
+   偏差是由负过零到正、再回到零的过程，中途那次"线在右边"不是错误，是走了弦的正常现象。
+   提前反向修等于把弦走成折线，必然蛇形。直道逻辑与 C-OVER 分支一个字都没动。
 
 v5.1 相对 v5 的改动（实测反馈：直线过度转向、弯道后段抽搐）：
 A. 直道彻底回滚到第四版逻辑：RoadModeFilter 判为 STRAIGHT 时走 decide_straight()，
@@ -90,6 +100,12 @@ MAX_CONSECUTIVE_TURNS = 4  # 连续转向拍数上限（中间没有前进），
 TURN_NO_EFFECT_PX = 3.0  # 一整组转向的改善量小于它，算"没转过去"
 TURN_NO_EFFECT_LIMIT = 2  # 连续这么多组无效就立正复位
 
+# ---------------- 弦段锁：过转之后先直走，别急着反向修 ----------------
+CHORD_HOLD_MAX_PACKETS = 3  # 软上限：直走到这儿，如果偏差不再收敛就放开
+CHORD_HOLD_HARD_PACKETS = 5  # 硬上限：不管收不收敛都放开（防一路走飞）
+CHORD_PROGRESS_PX = 3.0  # 偏差比这一轮峰值小这么多，就算"正在回线"，可以继续走
+CHORD_RELEASE_PX = TURN_EXIT_PX  # 近框回到这条带 = 已回到线上，弦段立即结束
+
 ACTION_NAMES = {0: "STAND", 1: "FORWARD", 3: "LEFT", 4: "RIGHT"}
 
 
@@ -156,6 +172,11 @@ def validate_config():
         raise ValueError("TURN_GAIN_INIT_PX must be inside its clamp range")
     if not 0.0 < TURN_GAIN_ALPHA <= 1.0 or TURN_NO_EFFECT_LIMIT < 1:
         raise ValueError("Invalid gain tuning")
+    if CHORD_HOLD_MAX_PACKETS < 1 or not 1 <= CHORD_RELEASE_PX <= TURN_ENTER_PX:
+        # 弦段解锁门槛必须比转向门槛小，否则"回到线上"永远判不出来，只能等安全上限。
+        raise ValueError("Need 1<=CHORD_RELEASE_PX<=TURN_ENTER_PX and hold>=1")
+    if CHORD_HOLD_MAX_PACKETS > CHORD_HOLD_HARD_PACKETS or CHORD_PROGRESS_PX < 0:
+        raise ValueError("Need soft chord hold <= hard hold")
     if (
         min(
             CYCLE_MARGIN_MS,
@@ -439,6 +460,10 @@ class SteerPolicy:
         self.no_effect = 0
         self.verified = 0  # 已核对过多少组转向（用于 warmup）
         self.overshot = 0  # 转过头次数；调大 TURN_GAIN_INIT_PX 的依据
+        # 弦段锁：过转之后正在"沿直线走回线上"，0 表示没锁
+        self.chord_dir = 0  # 触发这一轮弦段的转向方向
+        self.chord_walked = 0  # 弦段里已经直走了几拍
+        self.chord_peak = 0.0  # 弦段里出现过的最大近框偏差，用来判断"在不在收敛"
 
     def action_for(self, direction):
         action = 3 if direction < 0 else 4
@@ -446,15 +471,32 @@ class SteerPolicy:
             action = 7 - action
         return action
 
+    def arm_chord(self, direction):
+        """一组弯道转向发完：开始弦段，接下来只许往前走。"""
+        self.chord_dir = direction
+        self.chord_walked = 0
+        self.chord_peak = 0.0
+
+    def clear_chord(self):
+        self.chord_dir = 0
+        self.chord_walked = 0
+        self.chord_peak = 0.0
+
     def on_sent(self, action):
         if action == 1 or action == 0:
             self.last_dir = 0
             self.consec_turns = 0
             if action == 0:
                 self.no_effect = 0
+                self.clear_chord()  # 立正是姿态复位，弦段的几何前提已经不成立
+            elif self.chord_dir != 0:
+                self.chord_walked += 1
+                if self.chord_walked >= CHORD_HOLD_HARD_PACKETS:
+                    self.clear_chord()  # 硬上限：走到这儿不管有没有回线都放开
         else:
             self.last_dir = -1 if action == 3 else 1
             self.consec_turns += 1
+            self.clear_chord()  # 又开始转了，弦段作废
 
     def decide(self, geo, straight):
         """返回 (action, reason)；action=None 表示这一帧不作判断。"""
@@ -490,6 +532,25 @@ class SteerPolicy:
         # 保护 2：连转两组都没把偏差消下去，说明不是角度不够，是姿态/识别有问题。
         if self.no_effect >= TURN_NO_EFFECT_LIMIT:
             return 0, "C-NOEFF"
+        # 弦段锁：上一组转向转过头了，车头指着弧线内侧，车走的是"两个节点之间的弦"。
+        # 弦本来就切在弧的内侧，所以偏差会先翻到另一侧再自己回来——这段"线在右边"不是
+        # 错误，是走弦的正常过程。这时一律先直走，等它自己回到线上，绝不反向修。
+        if self.chord_dir != 0:
+            if near_ae > self.chord_peak:
+                self.chord_peak = near_ae
+            if near_ae <= CHORD_RELEASE_PX or e * self.chord_dir > 0:
+                # 回到线上，或偏差又回到转向那一侧（压根没转够）→ 弦段结束，交给常规逻辑
+                self.clear_chord()
+            elif (
+                self.chord_walked >= CHORD_HOLD_MAX_PACKETS
+                and near_ae >= self.chord_peak - CHORD_PROGRESS_PX
+            ):
+                # 走到软上限，而且偏差没在收敛（还贴着峰值）→ 不是走弦，是真的偏了
+                self.clear_chord()
+            elif self.chord_walked >= CHORD_HOLD_HARD_PACKETS:
+                self.clear_chord()  # 硬上限，防一路走飞
+            else:
+                return 1, "C-CHORD"
         # 刚转完向：近框已经落进对正带，就先走一步，别在原地继续磨。
         if self.last_dir != 0 and near_ae <= TURN_EXIT_PX:
             return 1, "C-POST"
@@ -641,6 +702,10 @@ class GaitController:
             else:
                 self.duration = ACTION_TIME_MS[action] + TURN_QUIET_MS
                 self.quiet_ms = self.duration
+                if self.burst.learn:
+                    # 弯道组：这一组发完就进弦段，接下来用"直走"把过转的量消化掉。
+                    # 直道单拍（learn=False）不进弦段，第四版逻辑保持原样。
+                    self.steer.arm_chord(self.burst.direction)
                 self.pending_verify = self.burst if self.burst.learn else None
                 self.burst = None
 
@@ -695,6 +760,11 @@ def run():
         # 先用这一帧的画面判直道/弯道，再按模式选决策逻辑：
         # STRAIGHT 走第四版原逻辑，其余（CURVE/CROSS/LOST）走第五版弯道逻辑。
         road_mode = road.update(None if discard else track, now)
+        # 弦段期间不许被判定为直道：走弦时三框本来就接近共线，很容易被判成 STRAIGHT，
+        # 可一旦走了直道逻辑，就会用直道门槛去"反向修"，正好是要压住的那个动作。
+        # 这里只是改标签，decide_straight 一个字节都没动。
+        if steer.chord_dir != 0 and road_mode == "STRAIGHT":
+            road_mode = "CURVE"
         straight = road_mode == "STRAIGHT"
         decision, new_reason = steer.decide(geo, straight)
         if not discard:
@@ -713,7 +783,7 @@ def run():
                     direction = LineFilter()
                     road = RoadModeFilter()
                 print(
-                    "TX %s x%d gap=%dms %s %s gain=%.1f c=%d over=%d"
+                    "TX %s x%d gap=%dms %s %s gain=%.1f c=%d over=%d ch=%d"
                     % (
                         ACTION_NAMES[next_action],
                         group_size,
@@ -723,6 +793,7 @@ def run():
                         steer.gain,
                         steer.consec_turns,
                         steer.overshot,
+                        steer.chord_walked if steer.chord_dir else 0,
                     )
                 )
 
@@ -739,8 +810,13 @@ def run():
             img.draw_string((0, 10), "Need 2 valid ROIs", color=255)
         img.draw_string(
             (0, 30),
-            "%s%s g%.0f c%d" % (
-                road_mode[:1], "4" if straight else "5", steer.gain, steer.consec_turns),
+            "%s%s g%.0f c%d%s" % (
+                road_mode[:1],
+                "4" if straight else "5",
+                steer.gain,
+                steer.consec_turns,
+                " ch%d" % steer.chord_walked if steer.chord_dir else "",
+            ),
             color=255,
         )
 
