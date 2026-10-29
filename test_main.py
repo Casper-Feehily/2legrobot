@@ -95,11 +95,11 @@ class TurnRecoveryTests(unittest.TestCase):
 
     def test_recovery_does_not_permanently_disable_curve_detection(self):
         packets = run_robot(80, 30, packet_limit=5)
-        self.assertEqual([packet[4] for _, packet in packets], [0, 3, 1, 3, 1])
+        self.assertEqual([packet[4] for _, packet in packets], [0, 3, 1, 7, 1])
 
     def test_direct_turn_switch_restores_stand_transition(self):
         packets = run_robot(80, 30, packet_limit=5, direct_turn=False)
-        self.assertEqual([packet[4] for _, packet in packets], [0, 3, 1, 0, 3])
+        self.assertEqual([packet[4] for _, packet in packets], [0, 3, 1, 0, 7])
 
     def test_real_loop_waits_for_two_reliable_rois_after_turn(self):
         packets = run_robot(80, None)
@@ -120,13 +120,13 @@ class TurnRecoveryTests(unittest.TestCase):
         self.assertGreaterEqual(packets[1][0] - packets[0][0], 1040)
 
     def test_loop_overlaps_turn_settling_and_stability_without_early_dispatch(self):
-        packets = run_robot(80, 30)
+        packets = run_robot(80, 30, turn_settle_ms=160)
         gap = packets[2][0] - packets[1][0]
         self.assertGreaterEqual(gap, 910)  # Full 750 ms action plus 160 ms settling.
         self.assertLess(gap, 960)  # Dispatch within one 50 ms frame after settling.
 
     def test_loop_respects_full_stand_settling_before_first_turn(self):
-        packets = run_robot(80, 30)
+        packets = run_robot(80, 30, stand_settle_ms=150)
         self.assertGreaterEqual(packets[1][0] - packets[0][0], 1150)
 
     def test_real_loop_keeps_turning_when_near_line_is_still_off_center(self):
@@ -164,6 +164,7 @@ class TurnRecoveryTests(unittest.TestCase):
 
     def test_turn_observations_start_only_after_the_full_action(self):
         robot, namespace = load_robot()
+        namespace["TURN_SETTLE_MS"] = 160
         namespace["time"] = SimpleNamespace(ticks_diff=lambda now, before: now - before)
         for action in (3, 4):
             with self.subTest(action=action):
@@ -176,6 +177,7 @@ class TurnRecoveryTests(unittest.TestCase):
 
     def test_stand_observations_overlap_settle_without_early_dispatch(self):
         robot, namespace = load_robot()
+        namespace["STAND_SETTLE_MS"] = 150
         namespace["time"] = SimpleNamespace(ticks_diff=lambda now, before: now - before)
         controller = robot.GaitController()
         controller.mark_sent(0, 1000)
@@ -188,6 +190,7 @@ class TurnRecoveryTests(unittest.TestCase):
 class HandoffTests(unittest.TestCase):
     def setUp(self):
         self.robot, self.namespace = load_robot()
+        self.namespace["CYCLE_MARGIN_MS"] = 80
         self.namespace["time"] = SimpleNamespace(ticks_diff=lambda now, before: now - before)
 
     def test_both_turns_start_only_after_full_walk_and_margin(self):

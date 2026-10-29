@@ -7,7 +7,8 @@ from test_tracking import GrayImage, run_images
 
 
 class TurnGroupTests(unittest.TestCase):
-    def packets_for(self, xs, *, settings=None, wide=None, recovered=None):
+    def packets_for(self, xs, *, settings=None, wide=(False, False, False),
+                    recovered=(False, False, False)):
         def observation(robot, sent):
             points = tuple((x, y) if x is not None else None
                            for x, y in zip(xs, (105, 75, 45)))
@@ -75,11 +76,23 @@ class TurnGroupTests(unittest.TestCase):
                 self.assertIsNone(controller.next_action(1, ready_at - 1))
                 self.assertEqual(controller.next_action(1, ready_at), 1)
 
+    def test_walk_handoff_supports_large_turn_with_or_without_stand_transition(self):
+        def observation(robot, sent):
+            xs = (80, 80, 80) if len(sent) < 2 else (60, 40, 20)
+            return robot.TrackObservation(tuple(zip(xs, (105, 75, 45))))
+        for direct, expected in ((True, [0, 1, 7]), (False, [0, 1, 0, 7])):
+            with self.subTest(direct=direct):
+                packets = run_images(lambda now, sent: GrayImage(),
+                                     packet_limit=len(expected), observation_factory=observation,
+                                     settings={"DIRECT_TURN_TRANSITION": direct})
+                self.assertEqual([p[4] for _, p in packets], expected)
+                self.assertGreaterEqual(packets[2][0] - packets[1][0], 1370)
+
     def test_large_turn_durations_must_be_positive(self):
         for group in (7, 8):
             with self.subTest(group=group):
                 robot, namespace = load_robot()
-                namespace["ACTION_TIME_MS"] = dict(namespace["ACTION_TIME_MS"], **{})
+                namespace["ACTION_TIME_MS"] = namespace["ACTION_TIME_MS"].copy()
                 namespace["ACTION_TIME_MS"][group] = 0
                 with self.assertRaises(ValueError):
                     robot.validate_config()

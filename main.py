@@ -1,14 +1,15 @@
 """LS-6A 原厂固件循迹：1号完整前进步态的衔接版。
 
-主板中需已下载 0=立正、1=前进、3=左转、4=右转。
+主板中需已下载 0=立正、1=前进、3/4=原左/右转、7/8=加幅左/右转。
 在 OpenMV IDE 打开整个文件运行；先预览，确认识线后改 ENABLE_MOTION=True。
 直行时每次播放1号一次，周期之间不插入0号立正。
 默认在完整前进结束后直接接转向；关闭 DIRECT_TURN_TRANSITION 可恢复立正过渡。
 持续丢线仍等当前前进周期结束后立正。
 三框至少两处可信纵向线才允许行走；横线污染的框不作为方向中心。
 转向结束后，实际近处线已回正时，先前进一周期，减少重复原地转向。
+直线偏移时用3/4小幅纠偏；三框干净且线形明显转弯时用7/8加幅转向。
 使用已验证的 UART3 / 9600 / 8N1 接线；不修改主板固件。
-本版按原始动作时间计时，没有动作完成回读；周期衔接会有短小间隔，
+本版按配置的动作时间计时，没有动作完成回读；周期衔接会有短小间隔，
 并非主板内无限循环。动作文件时长修改后应同步修改 ACTION_TIME_MS。
 """
 
@@ -25,7 +26,7 @@ BLACK_THRESHOLD = (0, 64)  # 黑色灰度范围，0 最黑、255 最白；通常
 
 H_MIRROR = False  # 水平镜像；用于匹配摄像头安装方向，切换后需重新核对左右判断。
 V_FLIP = False  # 垂直翻转；先调正画面，再设置近、远 ROI 的位置。
-REVERSE_TURNS = False  # True：交换左转 3 和右转 4；用于修正判断方向与实际转向相反。
+REVERSE_TURNS = False  # True：交换左右方向；先交换内部3/4，再选择原转向或加幅7/8。
 
 # 目标中心与转向灵敏度
 LINE_CENTER_X = 80  # 期望黑线所在的横坐标，可校准摄像头安装偏移；允许 1～158。
@@ -53,11 +54,11 @@ MAX_CENTER_JUMP = 60  # 同一帧近、远黑线中心允许的最大横向差�
 MAX_FRAME_MS = 150  # 单帧处理耗时及相邻判断间隔的上限，必须大于 0。
 # 单帧超时按丢线处理，判断间隔超时则重置稳定累计；太小易中断，太大可能接受旧画面。
 
-# 主板动作时长：资料原始 XML 的各帧时间合计；不是 7 号前进一步的时长。
-# 动作号：0=立正，1=完整前进步态，3=左转，4=右转。
-# 必须与主板实际动作文件时长一致，修改动作文件后同步修改；缩短这里不会让动作加速，
+# 主板动作计时：3/4保留原750 ms保守计时；7/8对应本机加幅XML的640/635 ms。
+# 动作号：0=立正，1=完整前进步态，3/4=原左/右转，7/8=加幅左/右转。
+# 动作时长与余量须覆盖主板实际执行时间，修改动作文件后同步核对；缩短这里不会让动作加速，
 # 只会让程序更早发送下一指令，可能干扰尚未完成的动作；本程序没有动作完成回读。
-ACTION_TIME_MS = {0: 1000, 1: 1300, 3: 750, 4: 750}
+ACTION_TIME_MS = {0: 1000, 1: 1300, 3: 750, 4: 750, 7: 640, 8: 635}
 CYCLE_MARGIN_MS = (
     70  # 前进时长之外的额外余量；调大衔接更保守、间隔更长，调小可能过早发令。
 )
@@ -80,6 +81,8 @@ STABLE_MS = 40  # 同一方向至少持续的时间；调大抗抖，调小反�
 # 直道判定依次限制：近处偏差、近远横向差、中点到近远连线的横向偏差（像素）。
 STRAIGHT_ENTER_LIMITS = (8, 8, 4)
 STRAIGHT_EXIT_LIMITS = (12, 14, 8)  # 退出阈值较宽，避免在边界来回切换模式。
+# 转向幅度只用后两项线形限制：近远横差>14或中点偏离连线>8时加幅。
+# 不用第一项居中限制，避免把整体偏向一侧的直线误判为需要大幅转向。
 STRAIGHT_STABLE_FRAMES = 3  # 只有三框均可信且无横线/重检，才累计直道确认。
 STRAIGHT_STABLE_MS = 100  # 进入直道须同时满足帧数与持续时间；有干扰立即退出快模式。
 START_DELAY_MS = 3000  # 开启运动后、首次发送立正前的准备时间；按实际摆放所需时间调整。
@@ -88,6 +91,8 @@ ACTION_NAMES = {
     1: "FORWARD",
     3: "LEFT",
     4: "RIGHT",
+    7: "LEFT_LARGE",
+    8: "RIGHT_LARGE",
 }  # 动作号与显示名称；非灵敏度参数。
 # 此映射也用于检查动作号；仅修改名称不能改变主板动作，动作号应与主板预存动作一致。
 
@@ -141,7 +146,7 @@ def validate_config():
 
 def action_packet(action_id):
     if action_id not in ACTION_NAMES:
-        raise ValueError("Use action 0, 1, 3 or 4")
+        raise ValueError("Use action 0, 1, 3, 4, 7 or 8")
     return bytes((0x55, 0x55, 0x05, 0x06, action_id, 0x01, 0x00))
 
 
@@ -266,6 +271,18 @@ def choose_action(near_x, far_x, after_turn=False):
     return action, error
 
 
+def select_action_group(action, track):
+    """保留方向判断；只有三框干净且线形明显转弯时才选加幅组。"""
+    if (action not in (3, 4) or any(p is None for p in track.points)
+            or any(track.wide) or any(track.recovered)):
+        return action
+    near, middle, far = track.points
+    if (abs(near[0] - far[0]) > STRAIGHT_EXIT_LIMITS[1]
+            or abs(middle[0] - project_x(near, far, middle[1])) > STRAIGHT_EXIT_LIMITS[2]):
+        return action + 4  # 左3→7、右4→8；左右交换已在choose_action完成。
+    return action
+
+
 class LineFilter:
     """只返回近期连续稳定的方向；丢线立即使当前判断无效。"""
 
@@ -356,7 +373,7 @@ class GaitController:
         if self.state == "WALK":
             if stable_action == 1:
                 return 1  # 继续完整步态，不调用立正
-            if stable_action in (3, 4) and DIRECT_TURN_TRANSITION:
+            if stable_action in (3, 4, 7, 8) and DIRECT_TURN_TRANSITION:
                 return stable_action  # 当前完整步态已结束，不再插入一秒立正
             if (
                 stable_action is None
@@ -365,7 +382,7 @@ class GaitController:
                 return None
             return 0  # 关闭直接衔接时换方向，或持续丢线：周期结束后立正一次
         # 动作完整执行后，在额外站稳时间内累计新判断；站稳时间结束前不会发令。
-        if stable_action in (1, 3, 4):
+        if stable_action in (1, 3, 4, 7, 8):
             return stable_action
         return None
 
@@ -441,6 +458,7 @@ def run():
             near_x, far_x,
             after_turn=controller.state == "TURN" and track.points[0] is not None,
         )
+        action = select_action_group(action, track)
         discard = controller.discard_observation(started)
         observed = None if discard else action
         road_mode = road.update(None if discard else track, now)

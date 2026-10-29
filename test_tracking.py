@@ -234,6 +234,7 @@ class RoadModeTests(unittest.TestCase):
         self.assertEqual(mode.update(self.track(), 251), "CURVE")
 
     def test_fast_handoff_only_applies_to_confirmed_forward_on_straight(self):
+        self.namespace["CYCLE_MARGIN_MS"] = 80
         for mode, action, ready, expected in (
             ("STRAIGHT", 1, 2340, 1), ("CURVE", 1, 2380, 1),
             ("CROSS", 1, 2380, 1), ("STRAIGHT", 3, 2380, 3),
@@ -281,7 +282,8 @@ class CameraLoopTests(unittest.TestCase):
             points = ((40, 105), (35, 75), (30, 45)) if len(sent) < 2 else (None, (55, 75), (30, 45))
             return robot.TrackObservation(points)
         packets = run_images(lambda now, sent: centered_line(), packet_limit=3,
-                             observation_factory=observation)
+                             observation_factory=observation,
+                             settings={"TURN_SETTLE_MS": 160})
         self.assertEqual([p[4] for _, p in packets], [0, 3, 3])
         self.assertGreaterEqual(packets[2][0] - packets[1][0], 910)
         self.assertLess(packets[2][0] - packets[1][0], 930)
@@ -314,6 +316,7 @@ class ConfigAndClockTests(unittest.TestCase):
 
     def test_wraparound_clock_preserves_full_action_and_stability(self):
         robot, namespace = load_robot()
+        namespace["CYCLE_MARGIN_MS"] = 80
         namespace["time"] = SimpleNamespace(ticks_diff=lambda a, b: ((a - b + 32768) % 65536) - 32768)
         controller = robot.GaitController()
         controller.mark_sent(1, 65500)
